@@ -193,3 +193,4 @@ data/
 db/
 .attach_pid*
 models/en-token.bin
+models/
