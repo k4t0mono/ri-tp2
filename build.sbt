@@ -11,8 +11,8 @@ libraryDependencies ++= Seq(
 
   // Machine learning
   "org.apache.spark" %% "spark-core" % "3.1.0",
-  "org.apache.spark" %% "spark-mllib" % "3.1.0" % "provided",
-
+  "org.apache.spark" %% "spark-mllib" % "3.1.0",
+  "org.apache.spark" %% "spark-sql" % "3.1.0",
 
 // NLP
   "org.apache.opennlp" % "opennlp-tools" % "1.9.3",
