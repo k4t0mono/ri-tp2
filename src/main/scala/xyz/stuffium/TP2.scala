@@ -4,7 +4,9 @@ import com.typesafe.scalalogging.LazyLogging
 import org.apache.log4j.{Level, Logger}
 import org.apache.spark.ml.Pipeline
 import org.apache.spark.ml.classification.NaiveBayes
+import org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator
 import org.apache.spark.ml.feature._
+import org.apache.spark.ml.tuning.{CrossValidator, CrossValidatorModel, ParamGridBuilder}
 import org.apache.spark.sql.types.{StringType, StructField, StructType}
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import xyz.stuffium.util.Importer
@@ -32,6 +34,9 @@ object TP2 extends LazyLogging {
       .setInputCol("class")
       .setOutputCol("label")
 
+    val sim = indexer.fit(trainRaw)
+    val train = sim.transform(trainRaw)
+
     val tokenizer = new Tokenizer()
       .setInputCol("text")
       .setOutputCol("tokensSW")
@@ -44,7 +49,6 @@ object TP2 extends LazyLogging {
     val hashingTF = new HashingTF()
       .setInputCol("tokens")
       .setOutputCol("rawTF")
-      .setNumFeatures(100)
 
     val idf = new IDF()
       .setInputCol("rawTF")
@@ -56,46 +60,46 @@ object TP2 extends LazyLogging {
       .setLabelCol("label")
       .setOutputCol("features")
 
+    val nb = new NaiveBayes()
+
     val pipeline = new Pipeline()
-      .setStages(Array(indexer, tokenizer, remover, hashingTF, idf, chiSq))
+      .setStages(Array(tokenizer, remover, hashingTF, idf, chiSq, nb))
 
-    val model = pipeline.fit(trainRaw)
-    val train = model.transform(trainRaw)
-    train.cache()
+    logger.warn("pipeline done")
 
+    val paramGrid = new ParamGridBuilder()
+      .addGrid(hashingTF.numFeatures, Array(100, 200, 500, 1000))
+      .addGrid(chiSq.numTopFeatures, Array(50, 100, 200, 500))
+      .build()
 
-    val naiveBayes = new NaiveBayes()
+    val evaluator = new MulticlassClassificationEvaluator()
+      .setLabelCol("label")
+      .setPredictionCol("prediction")
+      .setMetricName("accuracy")
 
-//    val model = pipeline.fit(trainRaw)
+    val cv = new CrossValidator()
+      .setEstimator(pipeline)
+      .setEvaluator(evaluator)
+      .setEstimatorParamMaps(paramGrid)
+      .setNumFolds(10)
 
-//    val paramGrid = new ParamGridBuilder()
-//      .addGrid(hashingTF.numFeatures, Array(100, 200))
-//      .addGrid(chiSq.numTopFeatures, Array(50, 100))
-//      .build()
-//
-//    val evaluator = new MulticlassClassificationEvaluator()
-//      .setLabelCol("label")
-//      .setPredictionCol("prediction")
-//      .setMetricName("accuracy")
-//
-//    val cv = new CrossValidator()
-//      .setEstimator(pipeline)
-//      .setEvaluator(evaluator)
-//      .setEstimatorParamMaps(paramGrid)
-//      .setNumFolds(3)
-//      .setParallelism(2)
+    logger.warn("Gonna create model")
 
-//    val model = cv.fit(trainRaw)
-//
-//    model.write.overwrite().save("./models/pipeline_nb_t")
-//
-//    model.transform(trainRaw).show()
+//    val model = cv.fit(train)
+//    println(model.avgMetrics.toList)
+//    model.write.overwrite.save("./models/nb_cv")
+    val model = CrossValidatorModel.load("./models/nb_cv")
 
-//    val prediction = model.transform(trainRaw)
-//
-//
-//    val accuracy = evaluator.evaluate(prediction)
-//    prediction.show()
+    val r = model.transform(train)
+    println(model.bestModel.params.toList)
+    r.show()
+
+    val eval = new MulticlassClassificationEvaluator()
+      .setLabelCol("label")
+      .setPredictionCol("prediction")
+      .setMetricName("fMeasureByLabel")
+
+    println(eval.evaluate(r))
 
     spark.close()
     logger.info("Byes")
@@ -105,6 +109,11 @@ object TP2 extends LazyLogging {
     val trainSet = Importer.importTrain()
     val data = trainSet
       .map(x => Row(x.categories.mkString(","), x.text))
+//    val data = trainSet
+//      .map(x => {
+//        val h = MurmurHash3.stringHash(x.categories.mkString(",")) % 100
+//        Row(h, x.text)
+//      })
 
     val schema = StructType(Array(
       StructField("class", StringType, nullable=false),
