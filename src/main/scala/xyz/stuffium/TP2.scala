@@ -4,10 +4,9 @@ import com.typesafe.scalalogging.LazyLogging
 import org.apache.log4j.{Level, Logger}
 import org.apache.spark.ml.Pipeline
 import org.apache.spark.ml.classification.NaiveBayes
-import org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator
 import org.apache.spark.ml.feature._
 import org.apache.spark.sql.types.{StringType, StructField, StructType}
-import org.apache.spark.sql.{Row, SparkSession}
+import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import xyz.stuffium.util.Importer
 
 object TP2 extends LazyLogging {
@@ -27,17 +26,7 @@ object TP2 extends LazyLogging {
       .master("local[*]")
       .getOrCreate()
 
-    val trainSet = Importer.importTrain()
-    val data = trainSet
-      .map(x => Row(x.categories.mkString(","), x.text))
-
-    val schema = StructType(Array(
-      StructField("class", StringType, nullable=false),
-      StructField("text", StringType, nullable=false)
-    ))
-
-    val rdd = spark.sparkContext.parallelize(data)
-    val df = spark.createDataFrame(rdd, schema)
+    val trainRaw = loadData(spark)
 
     val indexer = new StringIndexer()
       .setInputCol("class")
@@ -45,6 +34,11 @@ object TP2 extends LazyLogging {
 
     val tokenizer = new Tokenizer()
       .setInputCol("text")
+      .setOutputCol("tokensSW")
+
+    val remover = new StopWordsRemover()
+      .setLocale("en_US")
+      .setInputCol("tokensSW")
       .setOutputCol("tokens")
 
     val hashingTF = new HashingTF()
@@ -62,30 +56,63 @@ object TP2 extends LazyLogging {
       .setLabelCol("label")
       .setOutputCol("features")
 
+    val pipeline = new Pipeline()
+      .setStages(Array(indexer, tokenizer, remover, hashingTF, idf, chiSq))
+
+    val model = pipeline.fit(trainRaw)
+    val train = model.transform(trainRaw)
+    train.cache()
+
+
     val naiveBayes = new NaiveBayes()
 
-    val pipeline = new Pipeline()
-      .setStages(Array(indexer, tokenizer, hashingTF, idf, chiSq, naiveBayes))
+//    val model = pipeline.fit(trainRaw)
 
-    val model = pipeline.fit(df)
-    model.write.overwrite().save("/tmp/spark-logistic-regression-model")
+//    val paramGrid = new ParamGridBuilder()
+//      .addGrid(hashingTF.numFeatures, Array(100, 200))
+//      .addGrid(chiSq.numTopFeatures, Array(50, 100))
+//      .build()
+//
+//    val evaluator = new MulticlassClassificationEvaluator()
+//      .setLabelCol("label")
+//      .setPredictionCol("prediction")
+//      .setMetricName("accuracy")
+//
+//    val cv = new CrossValidator()
+//      .setEstimator(pipeline)
+//      .setEvaluator(evaluator)
+//      .setEstimatorParamMaps(paramGrid)
+//      .setNumFolds(3)
+//      .setParallelism(2)
 
-    val prediction = model
-      .transform(df)
+//    val model = cv.fit(trainRaw)
+//
+//    model.write.overwrite().save("./models/pipeline_nb_t")
+//
+//    model.transform(trainRaw).show()
 
-    val evaluator = new MulticlassClassificationEvaluator()
-      .setLabelCol("label")
-      .setPredictionCol("prediction")
-      .setMetricName("accuracy")
-
-    val accuracy = evaluator.evaluate(prediction)
-    println(accuracy)
-
-    //    val r = model.transform(df).select("tf-idf", "features").collect().last
-//    println(r)
+//    val prediction = model.transform(trainRaw)
+//
+//
+//    val accuracy = evaluator.evaluate(prediction)
+//    prediction.show()
 
     spark.close()
     logger.info("Byes")
+  }
+
+  def loadData(spark: SparkSession): DataFrame = {
+    val trainSet = Importer.importTrain()
+    val data = trainSet
+      .map(x => Row(x.categories.mkString(","), x.text))
+
+    val schema = StructType(Array(
+      StructField("class", StringType, nullable=false),
+      StructField("text", StringType, nullable=false)
+    ))
+
+    val rdd = spark.sparkContext.parallelize(data)
+    spark.createDataFrame(rdd, schema)
   }
 
 }

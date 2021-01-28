@@ -42,7 +42,8 @@ object Importer extends LazyLogging {
 
   def importFile(fl: File, cat: String): Unit = {
     val id = fl.toString.split("/").last.toInt
-    val text = PreProcessor.treatData(readFile(fl.toString))
+//    val text = PreProcessor.treatData(readFile(fl.toString))
+    val text = readFile(fl.toString)
 
     ArticleCategories.add(id, cat)
     articlesDict.put(id, ReutersArticle(id, text))
@@ -55,7 +56,7 @@ object Importer extends LazyLogging {
     val text = buff
       .getLines()
       .map(x => x.trim)
-      .mkString
+      .mkString(" ")
 
     buff.close()
 
