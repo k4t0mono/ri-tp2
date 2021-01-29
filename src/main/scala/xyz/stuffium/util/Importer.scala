@@ -11,9 +11,13 @@ object Importer extends LazyLogging {
 
   val articlesDict: mutable.HashMap[Int, ReutersArticle] = new mutable.HashMap[Int, ReutersArticle]()
 
-  def importTrain(): List[ReutersArticle] = {
+  def importData(test: Boolean): List[ReutersArticle] = {
     logger.debug("Importing train data")
-    val trainDir = new File("data/training")
+
+    val trainDir = test match {
+      case false => new File("data/training")
+      case true => new File("data/test")
+    }
 
     trainDir
       .listFiles()

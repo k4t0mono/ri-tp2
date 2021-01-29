@@ -18,8 +18,31 @@ object TP2 extends LazyLogging {
     .asInstanceOf[ch.qos.logback.classic.Logger]
     .setLevel(ch.qos.logback.classic.Level.INFO)
 
+  val tokenizer: Tokenizer = new Tokenizer()
+    .setInputCol("text")
+    .setOutputCol("tokensSW")
+
+  val remover: StopWordsRemover = new StopWordsRemover()
+    .setLocale("en_US")
+    .setInputCol("tokensSW")
+    .setOutputCol("tokens")
+
+  val hashingTF: HashingTF = new HashingTF()
+    .setInputCol("tokens")
+    .setOutputCol("rawTF")
+
+  val idf: IDF = new IDF()
+    .setInputCol("rawTF")
+    .setOutputCol("tf-idf")
+    .setMinDocFreq(2)
+
+  val chiSq: ChiSqSelector = new ChiSqSelector()
+    .setFeaturesCol("tf-idf")
+    .setLabelCol("label")
+    .setOutputCol("features")
+
   def main(args: Array[String]): Unit = {
-    Logger.getLogger("xyz").setLevel(Level.WARN)
+    Logger.getLogger("org").setLevel(Level.ERROR)
     logger.info("Hewos")
 
     val spark = SparkSession
@@ -33,39 +56,46 @@ object TP2 extends LazyLogging {
     val indexer = new StringIndexer()
       .setInputCol("class")
       .setOutputCol("label")
+      .fit(trainRaw)
 
-    val sim = indexer.fit(trainRaw)
-    val train = sim.transform(trainRaw)
+    val train = indexer.transform(trainRaw)
+//    val test = indexer.transform(loadData(spark, test=true))
 
-    val tokenizer = new Tokenizer()
-      .setInputCol("text")
-      .setOutputCol("tokensSW")
+    val model = test_nb(train)
 
-    val remover = new StopWordsRemover()
-      .setLocale("en_US")
-      .setInputCol("tokensSW")
-      .setOutputCol("tokens")
+    println(model.avgMetrics.toList)
 
-    val hashingTF = new HashingTF()
-      .setInputCol("tokens")
-      .setOutputCol("rawTF")
+//    model.write.overwrite.save("./models/nb_cv")
+//    val model = CrossValidatorModel.load("./models/nb_cv")
+//
+//    val r = model.transform(train)
+//    println(model.bestModel.params.toList)
+//    r.show()
+//
+//    val eval = new MulticlassClassificationEvaluator()
+//      .setLabelCol("label")
+//      .setPredictionCol("prediction")
+//      .setMetricName("fMeasureByLabel")
+//
+//    val rt = model.transform(train)
+//    rt.cache()
+//
+//    rt
+//      .select("label", "prediction")
+//      .write
+//      .mode(SaveMode.Overwrite)
+//      .csv("./aaa2.csv")
 
-    val idf = new IDF()
-      .setInputCol("rawTF")
-      .setOutputCol("tf-idf")
-      .setMinDocFreq(2)
+    spark.close()
+    logger.info("Byes")
+  }
 
-    val chiSq = new ChiSqSelector()
-      .setFeaturesCol("tf-idf")
-      .setLabelCol("label")
-      .setOutputCol("features")
-
+  def test_nb(dataFrame: DataFrame): CrossValidatorModel = {
+    logger.info("Testando Naive Bayes")
     val nb = new NaiveBayes()
 
     val pipeline = new Pipeline()
       .setStages(Array(tokenizer, remover, hashingTF, idf, chiSq, nb))
-
-    logger.warn("pipeline done")
 
     val paramGrid = new ParamGridBuilder()
       .addGrid(hashingTF.numFeatures, Array(100, 200, 500, 1000))
@@ -83,37 +113,16 @@ object TP2 extends LazyLogging {
       .setEstimatorParamMaps(paramGrid)
       .setNumFolds(10)
 
-    logger.warn("Gonna create model")
+    logger.info("Fim do treinamento")
 
-//    val model = cv.fit(train)
-//    println(model.avgMetrics.toList)
-//    model.write.overwrite.save("./models/nb_cv")
-    val model = CrossValidatorModel.load("./models/nb_cv")
-
-    val r = model.transform(train)
-    println(model.bestModel.params.toList)
-    r.show()
-
-    val eval = new MulticlassClassificationEvaluator()
-      .setLabelCol("label")
-      .setPredictionCol("prediction")
-      .setMetricName("fMeasureByLabel")
-
-    println(eval.evaluate(r))
-
-    spark.close()
-    logger.info("Byes")
+    cv.fit(dataFrame)
   }
 
-  def loadData(spark: SparkSession): DataFrame = {
-    val trainSet = Importer.importTrain()
-    val data = trainSet
+  def loadData(spark: SparkSession, test: Boolean = false): DataFrame = {
+    logger.info(s"loading data $test")
+    val rawData = Importer.importData(test)
+    val data = rawData
       .map(x => Row(x.categories.mkString(","), x.text))
-//    val data = trainSet
-//      .map(x => {
-//        val h = MurmurHash3.stringHash(x.categories.mkString(",")) % 100
-//        Row(h, x.text)
-//      })
 
     val schema = StructType(Array(
       StructField("class", StringType, nullable=false),
