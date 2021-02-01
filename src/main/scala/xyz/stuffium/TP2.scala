@@ -3,12 +3,13 @@ package xyz.stuffium
 import com.typesafe.scalalogging.LazyLogging
 import org.apache.log4j.{Level, Logger}
 import org.apache.spark.ml.Pipeline
-import org.apache.spark.ml.classification.NaiveBayes
+import org.apache.spark.ml.classification.{DecisionTreeClassifier, LinearSVC, NaiveBayes}
 import org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator
 import org.apache.spark.ml.feature._
 import org.apache.spark.ml.tuning.{CrossValidator, CrossValidatorModel, ParamGridBuilder}
 import org.apache.spark.sql.types.{StringType, StructField, StructType}
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
+import xyz.stuffium.TP2.Classificator.Classificator
 import xyz.stuffium.util.Importer
 
 object TP2 extends LazyLogging {
@@ -41,8 +42,14 @@ object TP2 extends LazyLogging {
     .setLabelCol("label")
     .setOutputCol("features")
 
+  val evaluator: MulticlassClassificationEvaluator = new MulticlassClassificationEvaluator()
+    .setLabelCol("label")
+    .setPredictionCol("prediction")
+    .setMetricName("accuracy")
+
   def main(args: Array[String]): Unit = {
     Logger.getLogger("org").setLevel(Level.ERROR)
+
     logger.info("Hewos")
 
     val spark = SparkSession
@@ -61,9 +68,14 @@ object TP2 extends LazyLogging {
     val train = indexer.transform(trainRaw)
 //    val test = indexer.transform(loadData(spark, test=true))
 
-    val model = test_nb(train)
-
-    println(model.avgMetrics.toList)
+    Seq(Classificator.NB, Classificator.SVM)
+      .foreach(x => {
+        val m = test(train, x).get
+        val p = m.bestModel.transform(train)
+        val e = evaluator.evaluate(p)
+        logger.error(s"$e")
+        println(e)
+    })
 
 //    model.write.overwrite.save("./models/nb_cv")
 //    val model = CrossValidatorModel.load("./models/nb_cv")
@@ -90,7 +102,43 @@ object TP2 extends LazyLogging {
     logger.info("Byes")
   }
 
+  def test(dataFrame: DataFrame, classificator: Classificator): Option[CrossValidatorModel] = {
+    classificator match {
+      case Classificator.NB => Some(test_nb(dataFrame))
+      case Classificator.SVM => Some(test_svm(dataFrame))
+      case _ => None
+    }
+  }
+
+  def test_svm(dataFrame: DataFrame): CrossValidatorModel = {
+    logger.info("Testando Naive Bayes")
+
+    val svm = new LinearSVC()
+    val dt = new DecisionTreeClassifier()
+
+    val pipeline = new Pipeline()
+      .setStages(Array(tokenizer, remover, hashingTF, idf, chiSq, dt))
+
+    val paramGrid = new ParamGridBuilder()
+      .addGrid(hashingTF.numFeatures, Array(100, 200, 500, 1000))
+      .addGrid(chiSq.numTopFeatures, Array(50, 100, 200, 500))
+      .addGrid(svm.maxIter, Array(10, 100, 200))
+      .addGrid(svm.regParam, Array(0.1, 0.01))
+      .build()
+
+    val cv = new CrossValidator()
+      .setEstimator(pipeline)
+      .setEvaluator(evaluator)
+      .setEstimatorParamMaps(paramGrid)
+      .setNumFolds(10)
+
+    logger.info("Fim do treinamento")
+
+    cv.fit(dataFrame)
+  }
+
   def test_nb(dataFrame: DataFrame): CrossValidatorModel = {
+
     logger.info("Testando Naive Bayes")
     val nb = new NaiveBayes()
 
@@ -101,11 +149,6 @@ object TP2 extends LazyLogging {
       .addGrid(hashingTF.numFeatures, Array(100, 200, 500, 1000))
       .addGrid(chiSq.numTopFeatures, Array(50, 100, 200, 500))
       .build()
-
-    val evaluator = new MulticlassClassificationEvaluator()
-      .setLabelCol("label")
-      .setPredictionCol("prediction")
-      .setMetricName("accuracy")
 
     val cv = new CrossValidator()
       .setEstimator(pipeline)
@@ -131,6 +174,11 @@ object TP2 extends LazyLogging {
 
     val rdd = spark.sparkContext.parallelize(data)
     spark.createDataFrame(rdd, schema)
+  }
+
+  object Classificator extends Enumeration {
+    type Classificator = Value
+    val NB, DT, SVM, MLP = Value
   }
 
 }
