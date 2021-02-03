@@ -9,7 +9,7 @@ import org.apache.spark.ml.feature._
 import org.apache.spark.ml.tuning.{CrossValidator, CrossValidatorModel, ParamGridBuilder}
 import org.apache.spark.sql.types.{StringType, StructField, StructType}
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
-import xyz.stuffium.TP2.Classificator.Classificator
+import xyz.stuffium.TP2.Classifier.Classifier
 import xyz.stuffium.util.Importer
 
 object TP2 extends LazyLogging {
@@ -68,7 +68,8 @@ object TP2 extends LazyLogging {
     val train = indexer.transform(trainRaw)
 //    val test = indexer.transform(loadData(spark, test=true))
 
-    Seq(Classificator.NB, Classificator.SVM)
+//    Classifier.tags()
+      Seq(Classifier.DT)
       .foreach(x => {
         val m = test(train, x).get
         val p = m.bestModel.transform(train)
@@ -102,10 +103,11 @@ object TP2 extends LazyLogging {
     logger.info("Byes")
   }
 
-  def test(dataFrame: DataFrame, classificator: Classificator): Option[CrossValidatorModel] = {
-    classificator match {
-      case Classificator.NB => Some(test_nb(dataFrame))
-      case Classificator.SVM => Some(test_svm(dataFrame))
+  def test(dataFrame: DataFrame, classifier: Classifier): Option[CrossValidatorModel] = {
+    classifier match {
+      case Classifier.NB => Some(test_nb(dataFrame))
+      case Classifier.SVM => Some(test_svm(dataFrame))
+      case Classifier.DT => Some(test_dt(dataFrame))
       case _ => None
     }
   }
@@ -138,7 +140,6 @@ object TP2 extends LazyLogging {
   }
 
   def test_nb(dataFrame: DataFrame): CrossValidatorModel = {
-
     logger.info("Testando Naive Bayes")
     val nb = new NaiveBayes()
 
@@ -148,6 +149,33 @@ object TP2 extends LazyLogging {
     val paramGrid = new ParamGridBuilder()
       .addGrid(hashingTF.numFeatures, Array(100, 200, 500, 1000))
       .addGrid(chiSq.numTopFeatures, Array(50, 100, 200, 500))
+      .build()
+
+    val cv = new CrossValidator()
+      .setEstimator(pipeline)
+      .setEvaluator(evaluator)
+      .setEstimatorParamMaps(paramGrid)
+      .setNumFolds(10)
+
+    logger.info("Fim do treinamento")
+
+    cv.fit(dataFrame)
+  }
+
+  def test_dt(dataFrame: DataFrame): CrossValidatorModel = {
+    logger.info("Testando Decision Tree")
+
+    val dt = new DecisionTreeClassifier()
+
+    val pipeline = new Pipeline()
+      .setStages(Array(tokenizer, remover, hashingTF, idf, chiSq, dt))
+
+    val paramGrid = new ParamGridBuilder()
+      .addGrid(hashingTF.numFeatures, Array(100, 200, 500, 1000))
+      .addGrid(chiSq.numTopFeatures, Array(50, 100, 200, 500))
+      .addGrid(dt.maxBins, Array(16, 32, 64, 128))
+      .addGrid(dt.maxDepth, Array(5, 10, 15, 20))
+      .addGrid(dt.minInfoGain, Array(0.0, 0.1, 0.2, 0.05, 0.01))
       .build()
 
     val cv = new CrossValidator()
@@ -176,9 +204,13 @@ object TP2 extends LazyLogging {
     spark.createDataFrame(rdd, schema)
   }
 
-  object Classificator extends Enumeration {
-    type Classificator = Value
+  object Classifier extends Enumeration {
+    type Classifier = Value
     val NB, DT, SVM, MLP = Value
+
+    def tags(): List[Classifier] = {
+      List(NB, DT, SVM, MLP)
+    }
   }
 
 }
