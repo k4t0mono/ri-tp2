@@ -9,14 +9,16 @@ import scala.io.Source
 
 object Importer extends LazyLogging {
 
-  val articlesDict: mutable.HashMap[Int, ReutersArticle] = new mutable.HashMap[Int, ReutersArticle]()
+  val articlesDict: mutable.HashMap[Int, ReutersArticle] = new mutable.HashMap[Int, ReutersArticle]
+  val articles: ListBuffer[ReutersArticle] = new ListBuffer[ReutersArticle]
 
-  def importData(test: Boolean): List[ReutersArticle] = {
+  def importData(test: Boolean, legacy: Boolean = false): List[ReutersArticle] = {
     logger.debug("Importing train data")
 
-    val trainDir = test match {
-      case false => new File("data/training")
-      case true => new File("data/test")
+    val trainDir = if (test) {
+      new File("data/test")
+    } else {
+      new File("data/training")
     }
 
     trainDir
@@ -24,14 +26,19 @@ object Importer extends LazyLogging {
       .toList
       .foreach(x => loadFilesCat(x))
 
-    articlesDict
-      .iterator
-      .map(x => {
-        x._2.update(ArticleCategories.get(x._1))
-        x._2
-      })
-      .toList
-      .sortBy(x => x.id)
+    if(legacy) {
+      articlesDict
+        .iterator
+        .map(x => {
+          x._2.update(ArticleCategories.get(x._1))
+          x._2
+        })
+        .toList
+        .sortBy(x => x.id)
+    } else {
+      articles
+        .toList
+    }
   }
 
   def loadFilesCat(path: File): Unit = {
@@ -45,6 +52,16 @@ object Importer extends LazyLogging {
   }
 
   def importFile(fl: File, cat: String): Unit = {
+    val id = fl.toString.split("/").last.toInt
+    val text = readFile(fl.toString)
+
+    val ac = ReutersArticle(id, text)
+    ac.update(List(cat))
+
+    articles += ac
+  }
+
+  def importFileOld(fl: File, cat: String): Unit = {
     val id = fl.toString.split("/").last.toInt
 //    val text = PreProcessor.treatData(readFile(fl.toString))
     val text = readFile(fl.toString)

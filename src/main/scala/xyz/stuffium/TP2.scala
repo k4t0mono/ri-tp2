@@ -2,14 +2,14 @@ package xyz.stuffium
 
 import com.typesafe.scalalogging.LazyLogging
 import org.apache.log4j.{Level, Logger}
-import org.apache.spark.ml.Pipeline
-import org.apache.spark.ml.classification.{DecisionTreeClassifier, LinearSVC, NaiveBayes}
+import org.apache.spark.ml.{Pipeline, PipelineModel}
+import org.apache.spark.ml.classification.{DecisionTreeClassifier, LinearSVC, LogisticRegression, NaiveBayes, OneVsRest}
 import org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator
 import org.apache.spark.ml.feature._
 import org.apache.spark.ml.tuning.{CrossValidator, CrossValidatorModel, ParamGridBuilder}
 import org.apache.spark.sql.types.{StringType, StructField, StructType}
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
-import xyz.stuffium.TP2.Classifier.Classifier
+import xyz.stuffium.TP2.Classifier.{Classifier, DT}
 import xyz.stuffium.util.Importer
 
 object TP2 extends LazyLogging {
@@ -40,6 +40,10 @@ object TP2 extends LazyLogging {
   val chiSq: ChiSqSelector = new ChiSqSelector()
     .setFeaturesCol("tf-idf")
     .setLabelCol("label")
+    .setOutputCol("featuresRaw")
+
+  val scaler: MinMaxScaler = new MinMaxScaler()
+    .setInputCol("featuresRaw")
     .setOutputCol("features")
 
   val evaluator: MulticlassClassificationEvaluator = new MulticlassClassificationEvaluator()
@@ -63,66 +67,125 @@ object TP2 extends LazyLogging {
     val indexer = new StringIndexer()
       .setInputCol("class")
       .setOutputCol("label")
-      .fit(trainRaw)
 
-    val train = indexer.transform(trainRaw)
-//    val test = indexer.transform(loadData(spark, test=true))
+    val preprocess = new Pipeline()
+      .setStages(Array(tokenizer, remover, indexer, hashingTF, idf))
+
+//    val model = preprocess.fit(trainRaw)
+    val model = PipelineModel.load("./cache/preprocess")
+    model.write.overwrite.save("./cache/preprocess")
+    val train = model.transform(trainRaw)
+    train.cache()
 
 //    Classifier.tags()
       Seq(Classifier.DT)
       .foreach(x => {
-        val m = test(train, x).get
-        val p = m.bestModel.transform(train)
+//        val m = test(train, x).get
+//        m.write.overwrite().save(s"models/$x")
+        val m = CrossValidatorModel.load(s"models/$x")
+        println(m.explainParams())
+        println(m.estimator.toString())
+        val p = m.transform(train)
+//        val p = validateBestModel(train, train, x, m).get
         val e = evaluator.evaluate(p)
+
+        p
+          .select("label", "prediction")
+          .coalesce(1)
+          .write
+          .csv(s"./results/$x.csv")
+
         logger.error(s"$e")
         println(e)
     })
 
-//    model.write.overwrite.save("./models/nb_cv")
-//    val model = CrossValidatorModel.load("./models/nb_cv")
-//
-//    val r = model.transform(train)
-//    println(model.bestModel.params.toList)
-//    r.show()
-//
-//    val eval = new MulticlassClassificationEvaluator()
-//      .setLabelCol("label")
-//      .setPredictionCol("prediction")
-//      .setMetricName("fMeasureByLabel")
-//
-//    val rt = model.transform(train)
-//    rt.cache()
-//
-//    rt
-//      .select("label", "prediction")
-//      .write
-//      .mode(SaveMode.Overwrite)
-//      .csv("./aaa2.csv")
-
     spark.close()
     logger.info("Byes")
+  }
+
+  def validateBestModel(train: DataFrame, test: DataFrame, classifier: Classifier, model: CrossValidatorModel): Option[DataFrame] = {
+    classifier match {
+      case DT =>
+        println(model.bestModel.extractParamMap())
+//        val dt = new DecisionTreeClassifier()
+//        val pipeline = new Pipeline()
+//          .setStages(Array(chiSq, scaler, dt))
+//        val m = pipeline.fit(train)
+//        Some(m.transform(test))
+        None
+      case _ => None
+    }
   }
 
   def test(dataFrame: DataFrame, classifier: Classifier): Option[CrossValidatorModel] = {
     classifier match {
       case Classifier.NB => Some(test_nb(dataFrame))
       case Classifier.SVM => Some(test_svm(dataFrame))
+      case Classifier.LR => Some(test_lr(dataFrame))
       case Classifier.DT => Some(test_dt(dataFrame))
       case _ => None
     }
+  }
+
+  def test_dt(dataFrame: DataFrame): CrossValidatorModel = {
+    logger.info("Testando Decision Tree ")
+
+    val dt = new DecisionTreeClassifier()
+
+    val pipeline = new Pipeline()
+      .setStages(Array(chiSq, scaler, dt))
+
+    val paramGrid = new ParamGridBuilder()
+      .addGrid(chiSq.numTopFeatures, Array(50, 100, 200, 500))
+      .addGrid(dt.maxDepth, Array(5, 10, 15))
+      .build()
+
+    val cv = new CrossValidator()
+      .setEstimator(pipeline)
+      .setEvaluator(evaluator)
+      .setEstimatorParamMaps(paramGrid)
+      .setNumFolds(10)
+
+    logger.info("Fim do treinamento")
+
+    cv.fit(dataFrame)
+  }
+
+  def test_lr(dataFrame: DataFrame): CrossValidatorModel = {
+    logger.info("Testando Logistic ")
+
+    val lr = new LogisticRegression()
+
+    val pipeline = new Pipeline()
+      .setStages(Array(chiSq, scaler, lr))
+
+    val paramGrid = new ParamGridBuilder()
+      .addGrid(chiSq.numTopFeatures, Array(50, 100, 200, 500))
+      .addGrid(lr.maxIter, Array(10, 100, 200))
+      .build()
+
+    val cv = new CrossValidator()
+      .setEstimator(pipeline)
+      .setEvaluator(evaluator)
+      .setEstimatorParamMaps(paramGrid)
+      .setNumFolds(10)
+
+    logger.info("Fim do treinamento")
+
+    cv.fit(dataFrame)
   }
 
   def test_svm(dataFrame: DataFrame): CrossValidatorModel = {
     logger.info("Testando Naive Bayes")
 
     val svm = new LinearSVC()
-    val dt = new DecisionTreeClassifier()
+    val ova = new OneVsRest()
+      .setClassifier(svm)
 
     val pipeline = new Pipeline()
-      .setStages(Array(tokenizer, remover, hashingTF, idf, chiSq, dt))
+      .setStages(Array(chiSq, scaler, ova))
 
     val paramGrid = new ParamGridBuilder()
-      .addGrid(hashingTF.numFeatures, Array(100, 200, 500, 1000))
       .addGrid(chiSq.numTopFeatures, Array(50, 100, 200, 500))
       .addGrid(svm.maxIter, Array(10, 100, 200))
       .addGrid(svm.regParam, Array(0.1, 0.01))
@@ -144,38 +207,10 @@ object TP2 extends LazyLogging {
     val nb = new NaiveBayes()
 
     val pipeline = new Pipeline()
-      .setStages(Array(tokenizer, remover, hashingTF, idf, chiSq, nb))
+      .setStages(Array(chiSq, scaler, nb))
 
     val paramGrid = new ParamGridBuilder()
-      .addGrid(hashingTF.numFeatures, Array(100, 200, 500, 1000))
       .addGrid(chiSq.numTopFeatures, Array(50, 100, 200, 500))
-      .build()
-
-    val cv = new CrossValidator()
-      .setEstimator(pipeline)
-      .setEvaluator(evaluator)
-      .setEstimatorParamMaps(paramGrid)
-      .setNumFolds(10)
-
-    logger.info("Fim do treinamento")
-
-    cv.fit(dataFrame)
-  }
-
-  def test_dt(dataFrame: DataFrame): CrossValidatorModel = {
-    logger.info("Testando Decision Tree")
-
-    val dt = new DecisionTreeClassifier()
-
-    val pipeline = new Pipeline()
-      .setStages(Array(tokenizer, remover, hashingTF, idf, chiSq, dt))
-
-    val paramGrid = new ParamGridBuilder()
-      .addGrid(hashingTF.numFeatures, Array(100, 200, 500, 1000))
-      .addGrid(chiSq.numTopFeatures, Array(50, 100, 200, 500))
-      .addGrid(dt.maxBins, Array(16, 32, 64, 128))
-      .addGrid(dt.maxDepth, Array(5, 10, 15, 20))
-      .addGrid(dt.minInfoGain, Array(0.0, 0.1, 0.2, 0.05, 0.01))
       .build()
 
     val cv = new CrossValidator()
@@ -206,10 +241,10 @@ object TP2 extends LazyLogging {
 
   object Classifier extends Enumeration {
     type Classifier = Value
-    val NB, DT, SVM, MLP = Value
+    val NB, LR, SVM, MLP, DT, RF = Value
 
     def tags(): List[Classifier] = {
-      List(NB, DT, SVM, MLP)
+      List(NB, LR, SVM, MLP, DT, RF)
     }
   }
 
