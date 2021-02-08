@@ -81,7 +81,7 @@ object TP2 extends LazyLogging {
 //    val test = model.transform(loadData(spark, test=true))
 //    test.cache()
 
-      Seq(Classifier.NB)
+      Seq(Classifier.DT)
       .foreach(x => {
         logger.info(s"Trying $x")
 
@@ -114,8 +114,34 @@ object TP2 extends LazyLogging {
     classifier match {
       case Classifier.NB => Some(test_nb(dataFrame))
       case Classifier.DT => Some(test_dt(dataFrame))
+      case Classifier.RF => Some(test_rf(dataFrame))
       case _ => None
     }
+  }
+
+  def test_rf(dataFrame: DataFrame): CrossValidatorModel = {
+    logger.info("Testando Decision Tree ")
+
+    val rf = new RandomForestClassifier()
+
+    val pipeline = new Pipeline()
+      .setStages(Array(chiSq, scaler, rf))
+
+    val paramGrid = new ParamGridBuilder()
+      .addGrid(chiSq.numTopFeatures, Array(50, 100, 200))
+      .addGrid(rf.maxDepth, Array(5, 10, 15))
+      .addGrid(rf.numTrees, Array(5, 10, 15))
+      .build()
+
+    val cv = new CrossValidator()
+      .setEstimator(pipeline)
+      .setEvaluator(evaluator)
+      .setEstimatorParamMaps(paramGrid)
+      .setNumFolds(10)
+
+    logger.info("Fim do treinamento")
+
+    cv.fit(dataFrame)
   }
 
   def test_dt(dataFrame: DataFrame): CrossValidatorModel = {
@@ -129,6 +155,7 @@ object TP2 extends LazyLogging {
     val paramGrid = new ParamGridBuilder()
       .addGrid(chiSq.numTopFeatures, Array(50, 100, 200))
       .addGrid(dt.maxDepth, Array(5, 10, 15))
+      .addGrid(dt.maxBins, Array(32, 16, 64))
       .build()
 
     val cv = new CrossValidator()
