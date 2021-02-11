@@ -72,35 +72,35 @@ object TP2 extends LazyLogging {
 //      .setStages(Array(tokenizer, remover, indexer, hashingTF, idf))
 //    val model = preprocess.fit(trainRaw)
 
-    val model = PipelineModel.load("./cache/preprocess")
-    model.write.overwrite.save("./cache/preprocess")
+    val preprocess = PipelineModel.load("./cache/preprocess")
+    preprocess.write.overwrite.save("./cache/preprocess")
 
-    val train = model.transform(loadData(spark))
+    val train = preprocess.transform(loadData(spark))
     train.cache()
 
 //    val test = model.transform(loadData(spark, test=true))
 //    test.cache()
 
-      Seq(Classifier.DT)
+      Seq(Classifier.NB)
       .foreach(x => {
         logger.info(s"Trying $x")
 
         val m = testClassifier(train, x).get
-        m.write.overwrite().save(s"models/$x")
-
+        m.write.overwrite().save(s"models/${x}_n2")
         logger.error(s"Trying $x")
         println(m.bestModel.explainParams())
 
-//        val m = CrossValidatorModel.load(s"models/$x")
+//        val m = CrossValidatorModel.load(s"models/${x}_n2")
+//        println(m.bestModel)
 
         val pred = m.transform(train)
         val eval = evaluator.evaluate(pred)
 
-        pred
-          .select("label", "prediction")
-          .coalesce(1)
-          .write
-          .csv(s"./results/$x.csv")
+//        pred
+//          .select("label", "prediction")
+//          .coalesce(1)
+//          .write
+//          .csv(s"./results/$x.csv")
 
         logger.error(s"$eval")
         println(eval)
@@ -131,13 +131,16 @@ object TP2 extends LazyLogging {
       .addGrid(chiSq.numTopFeatures, Array(50, 100, 200))
       .addGrid(rf.maxDepth, Array(5, 10, 15))
       .addGrid(rf.numTrees, Array(5, 10, 15))
+//      .addGrid(rf.maxBins, Array(32, 16, 64))
+      .addGrid(rf.impurity, Array("entropy", "gini"))
       .build()
 
     val cv = new CrossValidator()
       .setEstimator(pipeline)
       .setEvaluator(evaluator)
       .setEstimatorParamMaps(paramGrid)
-      .setNumFolds(10)
+      .setNumFolds(3)
+      .setParallelism(2)
 
     logger.info("Fim do treinamento")
 
@@ -177,7 +180,7 @@ object TP2 extends LazyLogging {
       .setStages(Array(chiSq, scaler, nb))
 
     val paramGrid = new ParamGridBuilder()
-      .addGrid(chiSq.numTopFeatures, Array(50, 100, 200))
+      .addGrid(chiSq.percentile, Array(0.1, 0.2, 0.15))
       .addGrid(nb.modelType, Array("multinomial"))
       .addGrid(nb.smoothing, Array(1.0, 0.5, 1.5))
       .build()
