@@ -2,7 +2,7 @@ package xyz.stuffium
 
 import com.typesafe.scalalogging.LazyLogging
 import org.apache.log4j.{Level, Logger}
-import org.apache.spark.ml.{Pipeline, PipelineModel}
+import org.apache.spark.ml.Pipeline
 import org.apache.spark.ml.classification._
 import org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator
 import org.apache.spark.ml.feature._
@@ -27,7 +27,7 @@ object TP2 extends LazyLogging {
     .setInputCol("class")
     .setOutputCol("label")
 
-  val converter = new IndexToString()
+  val converter: IndexToString = new IndexToString()
     .setInputCol("prediction")
     .setOutputCol("class_pred")
 
@@ -72,52 +72,51 @@ object TP2 extends LazyLogging {
       .master("local[*]")
       .getOrCreate()
 
-    val train_raw = loadData(spark)
-    val test_raw = loadData(spark, true)
-    val data_raw = train_raw.union(test_raw)
-
-//    val pre_pipe = new Pipeline()
-//      .setStages(Array(indexer, tokenizer, remover, hashingTF, idf))
-//    val preprocess = pre_pipe.fit(data_raw)
-
-    val preprocess = PipelineModel.load("./cache/preprocess")
-    preprocess.write.overwrite.save("./cache/preprocess")
-
-    val train = preprocess.transform(train_raw)
-    train.coalesce(1).write.json(s"cache/data/train")
-
-    val test = preprocess.transform(test_raw)
-    test.coalesce(1).write.json(s"cache/data/test")
-
-//      Classifier
-//        .tags()
-//        .foreach(x => {
-//          logger.info(s"Trying $x")
-//
-////          val m = testClassifier(train, x).get
-////          m.write.overwrite().save(s"cache/${x}")
-////          logger.error(s"Trying $x")
-////          println(m.bestModel.explainParams())
-//
-//          val m = CrossValidatorModel.load(s"cache/$x")
-//
-//          val pred = m.transform(test)
-//
-//          pred
-//            .coalesce(1)
-//            .write
-//            .csv(s"results/${x}")
-//
-//          val eval = evaluator.evaluate(pred)
-//          logger.error(s"$eval")
-//          println(eval)
-//      })
+    val (train, test) = getData(spark)
+    trainTestModel(Classifier.NB, train, test)
 
     spark.close()
     logger.info("Byes")
   }
 
-  def testClassifier(dataFrame: DataFrame, classifier: Classifier): Option[CrossValidatorModel] = {
+  def trainTestModel(classifier: Classifier, train: DataFrame, test: DataFrame): Unit = {
+    logger.info(s"Trying $classifier")
+
+    val m = trainClassifier(train, classifier).get
+    m.write.overwrite().save(s"cache/$classifier")
+
+    val prediction = m.transform(test)
+    prediction
+      .coalesce(1)
+      .write
+      .csv(s"results/$classifier")
+  }
+
+  def getData(spark: SparkSession, fit: Boolean = false): (DataFrame, DataFrame) = {
+    if (fit) {
+      val train_raw = loadData(spark)
+      val test_raw = loadData(spark, test=true)
+      val data_raw = train_raw.union(test_raw)
+
+      val pre_pipe = new Pipeline()
+        .setStages(Array(indexer, tokenizer, remover, hashingTF, idf))
+      val preprocess = pre_pipe.fit(data_raw)
+
+      preprocess.write.overwrite.save("./cache/preprocess")
+
+      val trainDF = preprocess.transform(train_raw)
+      trainDF.coalesce(1).write.json(s"cache/data/train")
+
+      val testDF = preprocess.transform(test_raw)
+      testDF.coalesce(1).write.json(s"cache/data/test")
+
+      (trainDF, testDF)
+    } else {
+      (spark.read.json(s"cache/data/train"), spark.read.json(s"cache/data/test"))
+    }
+  }
+
+  def trainClassifier(dataFrame: DataFrame, classifier: Classifier): Option[CrossValidatorModel] = {
     classifier match {
       case Classifier.NB => Some(test_nb(dataFrame))
       case Classifier.DT => Some(test_dt(dataFrame))
