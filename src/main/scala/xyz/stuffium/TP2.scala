@@ -2,7 +2,7 @@ package xyz.stuffium
 
 import com.typesafe.scalalogging.LazyLogging
 import org.apache.log4j.{Level, Logger}
-import org.apache.spark.ml.Pipeline
+import org.apache.spark.ml.{Pipeline, PipelineModel}
 import org.apache.spark.ml.classification._
 import org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator
 import org.apache.spark.ml.feature._
@@ -26,10 +26,6 @@ object TP2 extends LazyLogging {
   val indexer: StringIndexer = new StringIndexer()
     .setInputCol("class")
     .setOutputCol("label")
-
-  val converter: IndexToString = new IndexToString()
-    .setInputCol("prediction")
-    .setOutputCol("class_pred")
 
   val tokenizer: Tokenizer = new Tokenizer()
     .setInputCol("text")
@@ -72,60 +68,72 @@ object TP2 extends LazyLogging {
       .master("local[*]")
       .getOrCreate()
 
-    val (train, test) = getData(spark)
-    trainTestModel(Classifier.NB, train, test)
+    val (train, test) = getData(spark, fit=false)
+
+    val cls = Classifier.DT
+    val model = trainClassifier(train, cls, fit=true)
+    val e = testModel(model, test, cls)
+    println(e)
 
     spark.close()
     logger.info("Byes")
   }
 
-  def trainTestModel(classifier: Classifier, train: DataFrame, test: DataFrame): Unit = {
-    logger.info(s"Trying $classifier")
+  def testModel(model: CrossValidatorModel, test: DataFrame, classifier: Classifier): Double = {
+    val prediction = model.transform(test)
 
-    val m = trainClassifier(train, classifier).get
-    m.write.overwrite().save(s"cache/$classifier")
-
-    val prediction = m.transform(test)
     prediction
+      .select("class","label", "prediction")
       .coalesce(1)
       .write
+      .option("header", true)
       .csv(s"results/$classifier")
+
+    evaluator.evaluate(prediction)
   }
 
-  def getData(spark: SparkSession, fit: Boolean = false): (DataFrame, DataFrame) = {
-    if (fit) {
-      val train_raw = loadData(spark)
-      val test_raw = loadData(spark, test=true)
+  def getData(spark: SparkSession, fit: Boolean): (DataFrame, DataFrame) = {
+    val train_raw = loadData(spark)
+    val test_raw = loadData(spark, test=true)
+
+    val preprocess = if (fit) {
       val data_raw = train_raw.union(test_raw)
 
       val pre_pipe = new Pipeline()
         .setStages(Array(indexer, tokenizer, remover, hashingTF, idf))
-      val preprocess = pre_pipe.fit(data_raw)
 
-      preprocess.write.overwrite.save("./cache/preprocess")
+      val m = pre_pipe.fit(data_raw)
+      m.write.overwrite().save("./cache/PP")
 
-      val trainDF = preprocess.transform(train_raw)
-      trainDF.coalesce(1).write.json(s"cache/data/train")
-
-      val testDF = preprocess.transform(test_raw)
-      testDF.coalesce(1).write.json(s"cache/data/test")
-
-      (trainDF, testDF)
+      m
     } else {
-      (spark.read.json(s"cache/data/train"), spark.read.json(s"cache/data/test"))
+      PipelineModel.load("./cache/PP")
+    }
+
+    preprocess.write.overwrite.save("./cache/preprocess")
+
+    val trainDF = preprocess.transform(train_raw)
+    val testDF = preprocess.transform(test_raw)
+
+    (trainDF, testDF)
+  }
+
+  def trainClassifier(train: DataFrame, classifier: Classifier, fit: Boolean): CrossValidatorModel = {
+    if (fit) {
+      val m = classifier match {
+        case Classifier.NB => trainNB(train)
+        case Classifier.DT => trainDT(train)
+        case Classifier.RF => trainRF(train)
+      }
+
+      m.write.overwrite().save(s"cache/$classifier")
+      m
+    } else {
+      CrossValidatorModel.load(s"cache/$classifier")
     }
   }
 
-  def trainClassifier(dataFrame: DataFrame, classifier: Classifier): Option[CrossValidatorModel] = {
-    classifier match {
-      case Classifier.NB => Some(test_nb(dataFrame))
-      case Classifier.DT => Some(test_dt(dataFrame))
-      case Classifier.RF => Some(test_rf(dataFrame))
-      case _ => None
-    }
-  }
-
-  def test_rf(dataFrame: DataFrame): CrossValidatorModel = {
+  def trainRF(dataFrame: DataFrame): CrossValidatorModel = {
     logger.info("Testando Decision Tree ")
 
     val rf = new RandomForestClassifier()
@@ -153,7 +161,7 @@ object TP2 extends LazyLogging {
     cv.fit(dataFrame)
   }
 
-  def test_dt(dataFrame: DataFrame): CrossValidatorModel = {
+  def trainDT(dataFrame: DataFrame): CrossValidatorModel = {
     logger.info("Testando Decision Tree ")
 
     val dt = new DecisionTreeClassifier()
@@ -178,7 +186,7 @@ object TP2 extends LazyLogging {
     cv.fit(dataFrame)
   }
 
-  def test_nb(dataFrame: DataFrame): CrossValidatorModel = {
+  def trainNB(dataFrame: DataFrame): CrossValidatorModel = {
     logger.info("Testando Naive Bayes")
     val nb = new NaiveBayes()
 
