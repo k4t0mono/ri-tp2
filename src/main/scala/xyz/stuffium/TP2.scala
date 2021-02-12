@@ -2,11 +2,11 @@ package xyz.stuffium
 
 import com.typesafe.scalalogging.LazyLogging
 import org.apache.log4j.{Level, Logger}
+import org.apache.spark.ml.{Pipeline, PipelineModel}
 import org.apache.spark.ml.classification._
 import org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator
 import org.apache.spark.ml.feature._
 import org.apache.spark.ml.tuning.{CrossValidator, CrossValidatorModel, ParamGridBuilder}
-import org.apache.spark.ml.{Pipeline, PipelineModel}
 import org.apache.spark.sql.types.{StringType, StructField, StructType}
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import xyz.stuffium.TP2.Classifier.Classifier
@@ -22,6 +22,14 @@ object TP2 extends LazyLogging {
   Logger
     .getLogger("org")
     .setLevel(Level.ERROR)
+
+  val indexer: StringIndexer = new StringIndexer()
+    .setInputCol("class")
+    .setOutputCol("label")
+
+  val converter = new IndexToString()
+    .setInputCol("prediction")
+    .setOutputCol("class_pred")
 
   val tokenizer: Tokenizer = new Tokenizer()
     .setInputCol("text")
@@ -64,47 +72,46 @@ object TP2 extends LazyLogging {
       .master("local[*]")
       .getOrCreate()
 
-    val indexer = new StringIndexer()
-      .setInputCol("class")
-      .setOutputCol("label")
+    val train_raw = loadData(spark)
+    val test_raw = loadData(spark, true)
+    val data_raw = train_raw.union(test_raw)
 
-//    val preprocess = new Pipeline()
-//      .setStages(Array(tokenizer, remover, indexer, hashingTF, idf))
-//    val model = preprocess.fit(trainRaw)
+//    val pre_pipe = new Pipeline()
+//      .setStages(Array(indexer, tokenizer, remover, hashingTF, idf))
+//    val preprocess = pre_pipe.fit(data_raw)
 
     val preprocess = PipelineModel.load("./cache/preprocess")
     preprocess.write.overwrite.save("./cache/preprocess")
 
-    val train = preprocess.transform(loadData(spark))
-    train.cache()
+    val train = preprocess.transform(train_raw)
+    train.coalesce(1).write.json(s"cache/data/train")
 
-//    val test = model.transform(loadData(spark, test=true))
-//    test.cache()
+    val test = preprocess.transform(test_raw)
+    test.coalesce(1).write.json(s"cache/data/test")
 
-      Seq(Classifier.NB)
-      .foreach(x => {
-        logger.info(s"Trying $x")
-
-        val m = testClassifier(train, x).get
-        m.write.overwrite().save(s"models/${x}_n2")
-        logger.error(s"Trying $x")
-        println(m.bestModel.explainParams())
-
-//        val m = CrossValidatorModel.load(s"models/${x}_n2")
-//        println(m.bestModel)
-
-        val pred = m.transform(train)
-        val eval = evaluator.evaluate(pred)
-
-//        pred
-//          .select("label", "prediction")
-//          .coalesce(1)
-//          .write
-//          .csv(s"./results/$x.csv")
-
-        logger.error(s"$eval")
-        println(eval)
-    })
+//      Classifier
+//        .tags()
+//        .foreach(x => {
+//          logger.info(s"Trying $x")
+//
+////          val m = testClassifier(train, x).get
+////          m.write.overwrite().save(s"cache/${x}")
+////          logger.error(s"Trying $x")
+////          println(m.bestModel.explainParams())
+//
+//          val m = CrossValidatorModel.load(s"cache/$x")
+//
+//          val pred = m.transform(test)
+//
+//          pred
+//            .coalesce(1)
+//            .write
+//            .csv(s"results/${x}")
+//
+//          val eval = evaluator.evaluate(pred)
+//          logger.error(s"$eval")
+//          println(eval)
+//      })
 
     spark.close()
     logger.info("Byes")
@@ -128,7 +135,7 @@ object TP2 extends LazyLogging {
       .setStages(Array(chiSq, scaler, rf))
 
     val paramGrid = new ParamGridBuilder()
-      .addGrid(chiSq.numTopFeatures, Array(50, 100, 200))
+      .addGrid(chiSq.percentile, Array(0.1, 0.2, 0.15))
       .addGrid(rf.maxDepth, Array(5, 10, 15))
       .addGrid(rf.numTrees, Array(5, 10, 15))
 //      .addGrid(rf.maxBins, Array(32, 16, 64))
@@ -156,7 +163,7 @@ object TP2 extends LazyLogging {
       .setStages(Array(chiSq, scaler, dt))
 
     val paramGrid = new ParamGridBuilder()
-      .addGrid(chiSq.numTopFeatures, Array(50, 100, 200))
+      .addGrid(chiSq.percentile, Array(0.1, 0.2, 0.15))
       .addGrid(dt.maxDepth, Array(5, 10, 15))
       .addGrid(dt.maxBins, Array(32, 16, 64))
       .build()

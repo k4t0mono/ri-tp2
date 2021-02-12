@@ -3,6 +3,7 @@ package xyz.stuffium.util
 import com.typesafe.scalalogging.LazyLogging
 
 import java.io.File
+import java.nio.charset.MalformedInputException
 import scala.collection.mutable
 import scala.collection.mutable.ListBuffer
 import scala.io.Source
@@ -48,7 +49,13 @@ object Importer extends LazyLogging {
     path
       .listFiles()
       .toList
-      .foreach(x => importFile(x, cat))
+      .foreach(x => {
+        try {
+          importFile(x, cat)
+        } catch {
+          case e: MalformedInputException => logger.error(s"Could not read ${path.toString}, ${e.toString}")
+        }
+      })
   }
 
   def importFile(fl: File, cat: String): Unit = {
@@ -73,13 +80,13 @@ object Importer extends LazyLogging {
   def readFile(path: String): String = {
     logger.trace(s"readFile($path)")
     val buff = Source.fromFile(path)
-
-    val text = buff
-      .getLines()
-      .map(x => x.trim)
-      .mkString(" ")
-
+    val lines = buff.getLines().toList
     buff.close()
+
+    val text = lines
+      .map(x => x.trim)
+      .filter(x => x.nonEmpty)
+      .mkString(" ")
 
     text
   }
