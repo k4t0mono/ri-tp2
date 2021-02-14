@@ -73,9 +73,9 @@ object TP2 extends LazyLogging {
 
     val (train, test, allDF) = getData(spark, fit=false)
 
-    val cls = Classifier.DT
+    val cls = Classifier.RF
     val model = trainClassifier(train, cls, fit=false)
-    val e = testModel(model, test, cls, save=true)
+    val e = testModel(model, test, cls, save=false)
     println(e)
 
     testAllData(spark, cls, allDF, fit=true)
@@ -105,7 +105,7 @@ object TP2 extends LazyLogging {
         .coalesce(1)
         .write
         .option("header", value=true)
-        .csv(s"results/${classifier}_CV_${x._2}")
+        .csv(s"results/${classifier}/CV_${x._2}")
     })
 
   }
@@ -135,6 +135,20 @@ object TP2 extends LazyLogging {
           .addGrid(chiSq.percentile, Array(0.1))
           .addGrid(dt.maxBins, Array(32))
           .addGrid(dt.maxDepth, Array(10))
+          .build()
+
+        (pipeline, paramGrid)
+      case Classifier.RF =>
+        val rf = new RandomForestClassifier()
+
+        val pipeline = new Pipeline()
+          .setStages(Array(chiSq, scaler, rf))
+
+        val paramGrid = new ParamGridBuilder()
+          .addGrid(chiSq.percentile, Array(0.1))
+          .addGrid(rf.numTrees, Array(10))
+          .addGrid(rf.maxDepth, Array(15))
+          .addGrid(rf.impurity, Array("gini"))
           .build()
 
         (pipeline, paramGrid)
