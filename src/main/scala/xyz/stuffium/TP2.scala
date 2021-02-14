@@ -7,6 +7,7 @@ import org.apache.spark.ml.classification._
 import org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator
 import org.apache.spark.ml.feature._
 import org.apache.spark.ml.tuning.{CrossValidator, CrossValidatorModel, ParamGridBuilder}
+import org.apache.spark.mllib.util.MLUtils
 import org.apache.spark.sql.types.{StringType, StructField, StructType}
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import xyz.stuffium.TP2.Classifier.Classifier
@@ -59,6 +60,8 @@ object TP2 extends LazyLogging {
     .setPredictionCol("prediction")
     .setMetricName("accuracy")
 
+  val seed: Int = 0xe621
+
   def main(args: Array[String]): Unit = {
     logger.info("Hewos")
 
@@ -68,37 +71,107 @@ object TP2 extends LazyLogging {
       .master("local[*]")
       .getOrCreate()
 
-    val (train, test) = getData(spark, fit=false)
+    val (train, test, allDF) = getData(spark, fit=false)
 
     val cls = Classifier.DT
-    val model = trainClassifier(train, cls, fit=true)
-    val e = testModel(model, test, cls)
+    val model = trainClassifier(train, cls, fit=false)
+    val e = testModel(model, test, cls, save=true)
     println(e)
+
+    testAllData(spark, cls, allDF, fit=true)
 
     spark.close()
     logger.info("Byes")
   }
 
-  def testModel(model: CrossValidatorModel, test: DataFrame, classifier: Classifier): Double = {
+  def testAllData(sparkSession: SparkSession, classifier: Classifier, data: DataFrame, fit: Boolean): Unit = {
+    val cv = getBestClassifier(classifier)
+
+    val model = if(fit) {
+      val m = cv.fit(data)
+      m.write.overwrite().save(s"cache/${classifier}_CV")
+      m
+    } else {
+      CrossValidatorModel.load(s"cache/${classifier}_CV")
+    }
+
+    val splits = MLUtils.kFold(data.rdd, 10, seed)
+    splits.zipWithIndex.foreach(x => {
+      val validation = sparkSession.createDataFrame(x._1._2, data.schema)
+
+      val prediction = model.subModels(x._2).head.transform(validation)
+      prediction
+        .select("class", "label", "prediction")
+        .coalesce(1)
+        .write
+        .option("header", value=true)
+        .csv(s"results/${classifier}_CV_${x._2}")
+    })
+
+  }
+
+  def getBestClassifier(classifier: Classifier): CrossValidator = {
+    val (pipeline, paramGrid) = classifier match {
+      case Classifier.NB =>
+        val nb = new NaiveBayes()
+
+        val pipeline = new Pipeline()
+          .setStages(Array(chiSq, scaler, nb))
+
+        val paramGrid = new ParamGridBuilder()
+          .addGrid(chiSq.percentile, Array(0.1))
+          .addGrid(nb.modelType, Array("multinomial"))
+          .addGrid(nb.smoothing, Array(0.5))
+          .build()
+
+        (pipeline, paramGrid)
+      case Classifier.DT =>
+        val dt = new DecisionTreeClassifier()
+
+        val pipeline = new Pipeline()
+          .setStages(Array(chiSq, scaler, dt))
+
+        val paramGrid = new ParamGridBuilder()
+          .addGrid(chiSq.percentile, Array(0.1))
+          .addGrid(dt.maxBins, Array(32))
+          .addGrid(dt.maxDepth, Array(10))
+          .build()
+
+        (pipeline, paramGrid)
+    }
+
+    val cv = new CrossValidator()
+      .setEstimator(pipeline)
+      .setEvaluator(evaluator)
+      .setEstimatorParamMaps(paramGrid)
+      .setCollectSubModels(true)
+      .setSeed(seed)
+      .setNumFolds(10)
+
+    cv
+  }
+
+  def testModel(model: CrossValidatorModel, test: DataFrame, classifier: Classifier, save: Boolean): Double = {
     val prediction = model.transform(test)
 
-    prediction
-      .select("class","label", "prediction")
-      .coalesce(1)
-      .write
-      .option("header", true)
-      .csv(s"results/$classifier")
+    if (save) {
+      prediction
+        .select("class", "label", "prediction")
+        .coalesce(1)
+        .write
+        .option("header", value=true)
+        .csv(s"results/$classifier")
+    }
 
     evaluator.evaluate(prediction)
   }
 
-  def getData(spark: SparkSession, fit: Boolean): (DataFrame, DataFrame) = {
+  def getData(spark: SparkSession, fit: Boolean): (DataFrame, DataFrame, DataFrame) = {
     val train_raw = loadData(spark)
     val test_raw = loadData(spark, test=true)
+    val data_raw = train_raw.union(test_raw)
 
     val preprocess = if (fit) {
-      val data_raw = train_raw.union(test_raw)
-
       val pre_pipe = new Pipeline()
         .setStages(Array(indexer, tokenizer, remover, hashingTF, idf))
 
@@ -114,8 +187,9 @@ object TP2 extends LazyLogging {
 
     val trainDF = preprocess.transform(train_raw)
     val testDF = preprocess.transform(test_raw)
+    val allDF = preprocess.transform(data_raw)
 
-    (trainDF, testDF)
+    (trainDF, testDF, allDF)
   }
 
   def trainClassifier(train: DataFrame, classifier: Classifier, fit: Boolean): CrossValidatorModel = {
