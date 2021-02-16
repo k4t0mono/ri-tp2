@@ -1,12 +1,11 @@
 package xyz.stuffium
 
 import com.typesafe.scalalogging.LazyLogging
-import org.apache.log4j.{Level, Logger}
-import org.apache.spark.ml.{Pipeline, PipelineModel}
 import org.apache.spark.ml.classification._
 import org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator
 import org.apache.spark.ml.feature._
-import org.apache.spark.ml.tuning.{CrossValidator, CrossValidatorModel, ParamGridBuilder}
+import org.apache.spark.ml.tuning.{CrossValidator, CrossValidatorKME, CrossValidatorModel, ParamGridBuilder}
+import org.apache.spark.ml.{Pipeline, PipelineModel}
 import org.apache.spark.mllib.util.MLUtils
 import org.apache.spark.sql.types.{StringType, StructField, StructType}
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
@@ -16,13 +15,20 @@ import xyz.stuffium.util.Importer
 object TP2 extends LazyLogging {
 
   org.slf4j.LoggerFactory
-    .getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME)
+    .getLogger("xyz")
     .asInstanceOf[ch.qos.logback.classic.Logger]
     .setLevel(ch.qos.logback.classic.Level.INFO)
 
-  Logger
+  org.slf4j.LoggerFactory
     .getLogger("org")
-    .setLevel(Level.ERROR)
+    .asInstanceOf[ch.qos.logback.classic.Logger]
+    .setLevel(ch.qos.logback.classic.Level.ERROR)
+
+  org.slf4j.LoggerFactory
+    .getLogger("org.apache.spark.ml")
+    .asInstanceOf[ch.qos.logback.classic.Logger]
+    .setLevel(ch.qos.logback.classic.Level.INFO)
+
 
   val indexer: StringIndexer = new StringIndexer()
     .setInputCol("class")
@@ -74,7 +80,7 @@ object TP2 extends LazyLogging {
     val (train, test, allDF) = getData(spark, fit=false)
 
     val cls = Classifier.RF
-    val model = trainClassifier(train, cls, fit=false)
+    val model = trainClassifier(train.select("class", "label", "tf-idf"), cls, fit=false)
     val e = testModel(model, test, cls, save=false)
     println(e)
 
@@ -99,6 +105,7 @@ object TP2 extends LazyLogging {
     splits.zipWithIndex.foreach(x => {
       val validation = sparkSession.createDataFrame(x._1._2, data.schema)
 
+      logger.info(s"Testanto split ${x._2}")
       val prediction = model.subModels(x._2).head.transform(validation)
       prediction
         .select("class", "label", "prediction")
@@ -119,7 +126,7 @@ object TP2 extends LazyLogging {
           .setStages(Array(chiSq, scaler, nb))
 
         val paramGrid = new ParamGridBuilder()
-          .addGrid(chiSq.percentile, Array(0.1))
+          .addGrid(chiSq.numTopFeatures, Array(8000))
           .addGrid(nb.modelType, Array("multinomial"))
           .addGrid(nb.smoothing, Array(0.5))
           .build()
@@ -132,9 +139,9 @@ object TP2 extends LazyLogging {
           .setStages(Array(chiSq, scaler, dt))
 
         val paramGrid = new ParamGridBuilder()
-          .addGrid(chiSq.percentile, Array(0.1))
+          .addGrid(chiSq.numTopFeatures, Array(4025))
           .addGrid(dt.maxBins, Array(32))
-          .addGrid(dt.maxDepth, Array(10))
+          .addGrid(dt.maxDepth, Array(15))
           .build()
 
         (pipeline, paramGrid)
@@ -145,8 +152,8 @@ object TP2 extends LazyLogging {
           .setStages(Array(chiSq, scaler, rf))
 
         val paramGrid = new ParamGridBuilder()
-          .addGrid(chiSq.percentile, Array(0.1))
-          .addGrid(rf.numTrees, Array(10))
+          .addGrid(chiSq.numTopFeatures, Array(8000))
+          .addGrid(rf.numTrees, Array(15))
           .addGrid(rf.maxDepth, Array(15))
           .addGrid(rf.impurity, Array("gini"))
           .build()
@@ -154,7 +161,7 @@ object TP2 extends LazyLogging {
         (pipeline, paramGrid)
     }
 
-    val cv = new CrossValidator()
+    val cv = new CrossValidatorKME()
       .setEstimator(pipeline)
       .setEvaluator(evaluator)
       .setEstimatorParamMaps(paramGrid)
@@ -170,7 +177,7 @@ object TP2 extends LazyLogging {
 
     if (save) {
       prediction
-        .select("class", "label", "prediction")
+        .select("label", "prediction")
         .coalesce(1)
         .write
         .option("header", value=true)
@@ -196,8 +203,6 @@ object TP2 extends LazyLogging {
     } else {
       PipelineModel.load("./cache/PP")
     }
-
-    preprocess.write.overwrite.save("./cache/preprocess")
 
     val trainDF = preprocess.transform(train_raw)
     val testDF = preprocess.transform(test_raw)
@@ -230,19 +235,18 @@ object TP2 extends LazyLogging {
       .setStages(Array(chiSq, scaler, rf))
 
     val paramGrid = new ParamGridBuilder()
-      .addGrid(chiSq.percentile, Array(0.1, 0.2, 0.15))
       .addGrid(rf.maxDepth, Array(5, 10, 15))
       .addGrid(rf.numTrees, Array(5, 10, 15))
 //      .addGrid(rf.maxBins, Array(32, 16, 64))
       .addGrid(rf.impurity, Array("entropy", "gini"))
+      .addGrid(chiSq.numTopFeatures, Array(50, 4025, 8000))
       .build()
 
-    val cv = new CrossValidator()
+    val cv = new CrossValidatorKME()
       .setEstimator(pipeline)
       .setEvaluator(evaluator)
       .setEstimatorParamMaps(paramGrid)
       .setNumFolds(3)
-      .setParallelism(2)
 
     logger.info("Fim do treinamento")
 
@@ -253,17 +257,18 @@ object TP2 extends LazyLogging {
     logger.info("Testando Decision Tree ")
 
     val dt = new DecisionTreeClassifier()
+    val cacher = new Cacher()
 
     val pipeline = new Pipeline()
-      .setStages(Array(chiSq, scaler, dt))
+      .setStages(Array(chiSq, cacher, scaler, dt))
 
     val paramGrid = new ParamGridBuilder()
-      .addGrid(chiSq.percentile, Array(0.1, 0.2, 0.15))
       .addGrid(dt.maxDepth, Array(5, 10, 15))
       .addGrid(dt.maxBins, Array(32, 16, 64))
+      .addGrid(chiSq.numTopFeatures, Array(50, 4025, 8000))
       .build()
 
-    val cv = new CrossValidator()
+    val cv = new CrossValidatorKME()
       .setEstimator(pipeline)
       .setEvaluator(evaluator)
       .setEstimatorParamMaps(paramGrid)
@@ -282,12 +287,12 @@ object TP2 extends LazyLogging {
       .setStages(Array(chiSq, scaler, nb))
 
     val paramGrid = new ParamGridBuilder()
-      .addGrid(chiSq.percentile, Array(0.1, 0.2, 0.15))
       .addGrid(nb.modelType, Array("multinomial"))
       .addGrid(nb.smoothing, Array(1.0, 0.5, 1.5))
+      .addGrid(chiSq.numTopFeatures, Array(50, 4025, 8000))
       .build()
 
-    val cv = new CrossValidator()
+    val cv = new CrossValidatorKME()
       .setEstimator(pipeline)
       .setEvaluator(evaluator)
       .setEstimatorParamMaps(paramGrid)
